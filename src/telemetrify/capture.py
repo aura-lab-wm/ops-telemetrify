@@ -9,11 +9,8 @@ from . import LOG_PATH, DATA_DIR
 from .db import connect
 from .store import upsert_session, insert_turn, record_ingest_run
 from .transcript import parse_latest_turn
-from .agents.grok import (
-    is_grok_path,
-    session_dir_for as grok_session_dir,
-    parse_latest_turn as parse_latest_grok_turn,
-)
+from .agents.grok import is_grok_path, session_dir_for as grok_session_dir
+from .agents.registry import detect_agent, parser_for
 
 
 def _log(msg: str) -> None:
@@ -56,7 +53,7 @@ def _resolve_transcript(payload: dict) -> tuple[Path, str] | None:
             if d is not None:
                 return d, "grok"
         if p.exists():
-            return p, "claude_code"
+            return p, detect_agent(p)
     session_id = _payload_get(payload, "session_id", "sessionId", "conversation_id", "conversationId")
     if not session_id:
         return None
@@ -103,10 +100,8 @@ def main() -> int:
             return 0
         transcript_path, agent = resolved
 
-        if agent == "grok":
-            turn = parse_latest_grok_turn(transcript_path)
-        else:
-            turn = parse_latest_turn(transcript_path)
+        parse = parser_for(agent)
+        turn = parse(transcript_path) if parse else parse_latest_turn(transcript_path)
         if turn is None:
             return 0
         turn.agent = agent
