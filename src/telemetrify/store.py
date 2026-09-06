@@ -10,8 +10,9 @@ def upsert_session(conn: sqlite3.Connection, turn: Turn) -> None:
     conn.execute(
         """
         INSERT INTO sessions(id, started_at, last_turn_at, cwd, git_branch,
-                             project_dir, transcript_path, entrypoint, user_type, cli_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             project_dir, transcript_path, entrypoint, user_type, cli_version,
+                             agent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             last_turn_at    = excluded.last_turn_at,
             transcript_path = COALESCE(excluded.transcript_path, sessions.transcript_path),
@@ -21,7 +22,7 @@ def upsert_session(conn: sqlite3.Connection, turn: Turn) -> None:
             turn.session_id, turn.started_at, turn.finished_at or turn.started_at,
             turn.cwd or "", turn.git_branch,
             turn.project_dir, turn.transcript_path, turn.entrypoint, turn.user_type,
-            turn.cli_version,
+            turn.cli_version, turn.agent,
         ),
     )
 
@@ -45,9 +46,10 @@ def insert_turn(
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
             cwd, git_branch, cli_version,
             attribution_skill, attribution_plugin,
-            tool_call_count, assistant_message_count, raw_json_z, origin
+            tool_call_count, assistant_message_count, raw_json_z, origin,
+            provider
         )
-        VALUES (?, ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?,  ?, ?,  ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?,  ?, ?,  ?, ?, ?, ?,  ?)
         """,
         (
             turn.session_id, turn.prompt_id, turn.user_uuid, turn.parent_uuid,
@@ -57,6 +59,7 @@ def insert_turn(
             turn.cwd, turn.git_branch, turn.cli_version,
             turn.attribution_skill, turn.attribution_plugin,
             turn.tool_call_count, turn.assistant_message_count, raw_z, origin,
+            turn.provider,
         ),
     )
     if cur.rowcount == 0:

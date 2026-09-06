@@ -46,6 +46,14 @@ class Turn:
     assistant_message_count: int
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw_json: str = ""
+    # Which CLI wrote the transcript. Defaulted so every existing construction
+    # in this module stays valid — claude_code is the only thing that reaches
+    # build_turn(), and saying so explicitly beats leaving it implied.
+    agent: str = "claude_code"
+    # Which backend served THIS turn's tokens. None means 'not recorded',
+    # which is the truth for everything captured before migration 019 —
+    # see that migration for why it is not backfilled to 'anthropic'.
+    provider: str | None = None
 
 
 def iter_records(path: Path) -> Iterator[dict]:
