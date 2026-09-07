@@ -133,9 +133,13 @@ def test_rebuild_preserves_cluster_membership_for_turns_outside_window(migrated_
                     f"2026-06-03T00:00:{i:02d}.000Z", emb)
         new_ids.append(tid)
 
-    monkeypatch.setattr(cluster, "WINDOW_RECENT", len(new_ids))
-
-    summary = cluster.rebuild_clusters(conn, min_cluster_size=3, log=lambda *_a: None)
+    # rebuild_clusters now defaults to the WHOLE corpus (limit=None) — the
+    # 2,000-turn cap was the reason coverage sat at 15.7%. The scoped-delete
+    # guarantee this test protects still applies whenever a limit IS given, so
+    # the window is now requested explicitly rather than monkeypatched onto a
+    # module constant the default path no longer reads.
+    summary = cluster.rebuild_clusters(conn, min_cluster_size=3,
+                                       limit=len(new_ids), log=lambda *_a: None)
     assert summary["clusters"] >= 1, f"expected at least one real cluster, got {summary!r}"
 
     # The old, out-of-window cluster row must NOT have been deleted...
@@ -166,8 +170,11 @@ def test_rebuild_preserves_cluster_membership_for_turns_outside_window(migrated_
         assert row is not None and row["cluster_id"] is not None
 
     # A second rebuild (idempotent, per the docstring) must not cumulatively
-    # lose the out-of-window membership either.
-    cluster.rebuild_clusters(conn, min_cluster_size=3, log=lambda *_a: None)
+    # lose the out-of-window membership either. Same explicit window as above:
+    # without it this is a full-corpus rebuild, which legitimately reassigns the
+    # old turn and so would not be testing the scoped delete at all.
+    cluster.rebuild_clusters(conn, min_cluster_size=3, limit=len(new_ids),
+                             log=lambda *_a: None)
     old_cluster_row2 = conn.execute(
         "SELECT id FROM prompt_clusters WHERE id=?", (old_cluster_id,)
     ).fetchone()
