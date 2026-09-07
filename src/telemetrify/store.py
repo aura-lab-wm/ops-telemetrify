@@ -114,7 +114,7 @@ def insert_turn(
 
 def record_ingest_run(
     conn: sqlite3.Connection,
-    source: Literal["hook", "backfill"],
+    source: Literal["hook", "backfill", "scan"],
     started_at: str,
     finished_at: str,
     inserted: int,
