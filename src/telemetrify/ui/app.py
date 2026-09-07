@@ -60,6 +60,27 @@ _env = Environment(
 
 app = FastAPI(title="Prompt Telemetry")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def asset(path: str) -> str:
+    """/static/<path> stamped with the file's mtime, so an edit is never masked
+    by the browser cache.
+
+    StaticFiles answers with an ETag and Last-Modified, which is correct for a
+    deployed app and wrong for this one: every CSS or JS change here was being
+    served from Chrome's cache on an ordinary navigation, so edits looked like
+    they had silently failed. A mtime query stamp makes the URL change whenever
+    the bytes change — the browser refetches exactly when it should, and never
+    otherwise. Falls back to the bare path if the file is missing rather than
+    raising inside a template render.
+    """
+    try:
+        return f"/static/{path}?v={int((STATIC_DIR / path).stat().st_mtime)}"
+    except OSError:
+        return f"/static/{path}"
+
+
+_env.globals["asset"] = asset
 app.include_router(dash0_router)
 
 # html=False: the commonmark preset enables raw-HTML passthrough, but the

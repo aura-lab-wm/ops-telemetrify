@@ -132,8 +132,8 @@
 </section>
 
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<script src="/static/dashboard.js"></script>
-<script src="/static/push-client.js"></script>
+<script src="{{ asset('dashboard.js') }}"></script>
+<script src="{{ asset('push-client.js') }}"></script>
 <script>
   // Daily-digest banner — show today's summary if generated.
   (async () => {

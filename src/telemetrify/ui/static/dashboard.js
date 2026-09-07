@@ -1,8 +1,12 @@
 // The Telemetry Ledger — dashboard wiring.
 // Populates the masthead/narrative-fold from /api/dashboard/headline, then
 // renders twelve Plotly figures from /api/charts/<name>. The server already
-// returns Ledger-themed layouts (paper/plot bg, font, colorway, grid),
-// so this file does not override visual layout — it only newPlot's.
+// returns Ledger-themed layouts (paper/plot bg, font, colorway, grid), so
+// this file leaves the ground and every DATA colour alone. It only adjusts
+// what has to be decided in the browser: responsive title/axis/legend
+// fitting, x-tick thinning against measured text width, axis-chrome
+// contrast (from the --chart-* tokens in app.css), and exhibit numbering
+// in document order.
 //
 // Ordered to match the on-page group order (see dashboard.html):
 //   i.   Trust & evidence      — unsupported_claim_rate, command_outcome_rate
@@ -320,6 +324,344 @@ function adaptCategoryLabelsForWidth(fig, containerWidth) {
   return fig;
 }
 
+/* ── Chart chrome contrast ──────────────────────────────────────────── */
+// The server paints axis chrome from charts.py's _LEDGER_AXIS: tick labels
+// #a1a1aa, axis titles #71717a (~4:1 against the #0a0a0a plate) and
+// gridlines at 5% white. At 10-11px on a near-black panel the axis titles
+// sit right at the edge of readability and the gridlines are effectively
+// invisible. Raise the CHROME only — one step up the same zinc ramp the
+// rest of the page already uses (--ink / --ink-mid / --ink-low in app.css)
+// — and leave every DATA colour (the orange/red colorway, the heatmap
+// scale, per-trace marker/line colours, the red "corrected" callouts)
+// exactly as the server sent it. This is a contrast fix, not a re-palette.
+//
+// The actual values live next to the other design tokens in app.css
+// (--chart-tick / --chart-axis-title / --chart-grid / --chart-axis-line /
+// --chart-zero-line) so the chart chrome can't drift away from the page's
+// own ink scale; the literals below are the same values, used only if the
+// custom properties can't be read.
+const CHART_CHROME_DEFAULTS = {
+  tick:      "#d4d4d8",                  // zinc-300 — ~13:1 on #0a0a0a
+  axisTitle: "#e4e4e7",                  // zinc-200 — the axis's own label
+  grid:      "rgba(255,255,255,0.10)",   // recessive, but actually visible
+  axisLine:  "rgba(255,255,255,0.22)",
+  zeroLine:  "rgba(255,255,255,0.16)",
+};
+const SERVER_MUTED_INK = "#a1a1aa"; // charts.py's neutral for in-plot value labels
+
+let chartChromeCache = null;
+
+function chartChrome() {
+  if (chartChromeCache) return chartChromeCache;
+  let styles = null;
+  try {
+    styles = getComputedStyle(document.body || document.documentElement);
+  } catch (err) {
+    styles = null;
+  }
+  const read = (prop, fallback) => {
+    if (!styles) return fallback;
+    const value = String(styles.getPropertyValue(prop) || "").trim();
+    return value || fallback;
+  };
+  chartChromeCache = {
+    tick:      read("--chart-tick", CHART_CHROME_DEFAULTS.tick),
+    axisTitle: read("--chart-axis-title", CHART_CHROME_DEFAULTS.axisTitle),
+    grid:      read("--chart-grid", CHART_CHROME_DEFAULTS.grid),
+    axisLine:  read("--chart-axis-line", CHART_CHROME_DEFAULTS.axisLine),
+    zeroLine:  read("--chart-zero-line", CHART_CHROME_DEFAULTS.zeroLine),
+  };
+  return chartChromeCache;
+}
+
+function enhanceChromeContrast(fig) {
+  if (!fig || !fig.layout) return fig;
+  const ink = chartChrome();
+
+  // Every axis the layout defines — including the secondary axes on the
+  // two dual-axis plates, whose titles ship at the dimmest colour of all.
+  for (const key of Object.keys(fig.layout)) {
+    if (!/^[xy]axis/.test(key)) continue;
+    const axis = fig.layout[key];
+    if (!axis || typeof axis !== "object") continue;
+    const next = {
+      ...axis,
+      gridcolor:     ink.grid,
+      zerolinecolor: ink.zeroLine,
+      linecolor:     ink.axisLine,
+      tickcolor:     ink.axisLine,
+      // keep the family/size the chart chose (e.g. the serif cluster
+      // labels) — only the colour changes.
+      tickfont: { ...(axis.tickfont || {}), color: ink.tick },
+    };
+    const title = axis.title;
+    if (title && typeof title === "object") {
+      next.title = { ...title, font: { ...(title.font || {}), color: ink.axisTitle } };
+    } else if (typeof title === "string") {
+      next.title = { text: title, font: { color: ink.axisTitle } };
+    }
+    fig.layout[key] = next;
+  }
+
+  fig.layout.font = { ...(fig.layout.font || {}), color: ink.tick };
+  if (fig.layout.legend) {
+    fig.layout.legend = {
+      ...fig.layout.legend,
+      font: { ...(fig.layout.legend.font || {}), color: ink.tick },
+    };
+  }
+
+  for (const trace of Array.isArray(fig.data) ? fig.data : []) {
+    if (!trace || typeof trace !== "object") continue;
+    if (trace.colorbar) {
+      trace.colorbar = {
+        ...trace.colorbar,
+        tickfont: { ...(trace.colorbar.tickfont || {}), color: ink.tick },
+        outlinecolor: ink.axisLine,
+      };
+    }
+    // In-plot value labels the server left at its neutral ink (the bar
+    // count labels). Anything the chart coloured deliberately — the red
+    // "corrected" percentages, the cream pie labels — is left alone.
+    if (trace.textfont && trace.textfont.color === SERVER_MUTED_INK) {
+      trace.textfont = { ...trace.textfont, color: ink.tick };
+    }
+  }
+  return fig;
+}
+
+/* ── Exhibit (figure) numbering ─────────────────────────────────────── */
+// charts.py stamps each chart with a fixed "Fig. N" caption numbered in the
+// order the chart functions happen to be DEFINED there, which is not the
+// order the plates are laid out on the page — the two lead plates arrive as
+// "Fig. 12" and "Fig. 11", and the rest are shuffled too. Renumber from the
+// chart divs' ACTUAL position in the document so captions ascend as the
+// page is read. Presentation only: nothing about the data, the query, or
+// which chart lands in which plate changes, and a caption without a
+// "Fig. N" prefix is left untouched.
+const EXHIBIT_PREFIX_RE = /^(\s*Fig\.\s*)\d+/;
+
+let exhibitNumbers = null;
+
+function exhibitNumberFor(divId) {
+  if (!exhibitNumbers) {
+    // Derive from the live DOM rather than from CHARTS' own order, so the
+    // numbering stays correct even if the template's plate order changes.
+    const els = CHARTS.map(([, id]) => document.getElementById(id)).filter(Boolean);
+    els.sort((a, b) =>
+      (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1
+    );
+    exhibitNumbers = new Map(els.map((el, i) => [el.id, i + 1]));
+  }
+  return exhibitNumbers.get(divId);
+}
+
+function renumberExhibit(fig, number) {
+  if (!number || !fig || !fig.layout || !fig.layout.title) return fig;
+  const title = fig.layout.title;
+  const text = typeof title === "string" ? title : title.text;
+  if (typeof text !== "string" || !EXHIBIT_PREFIX_RE.test(text)) return fig;
+  const renumbered = text.replace(EXHIBIT_PREFIX_RE, `$1${number}`);
+  fig.layout.title = typeof title === "string"
+    ? renumbered
+    : { ...title, text: renumbered };
+  return fig;
+}
+
+/* ── Dense x-axis tick labels ───────────────────────────────────────── */
+// The weekly plates plot ~25 ISO-week categories ("2026-W11", "2026-W12",
+// …) on a CATEGORY x axis, and Plotly's default for a category axis is one
+// tick per category — it never drops labels. At plate width ~25 eight-
+// character labels cannot fit side by side, so Plotly falls back to
+// rotating them ~45°, at which point they run through each other into an
+// illegible smear.
+//
+// Fixed in the order legibility actually prefers:
+//   1. SHORTEN  — "2026-W11" → "W11", with the year moved into the axis
+//                 title ("ISO week · 2026"). When the window straddles a
+//                 year boundary the year is additionally stamped, as a
+//                 second line, on the first shown tick of each year, so no
+//                 information is lost.
+//   2. THIN     — show every Nth label, where N is derived from the
+//                 MEASURED pixel width of the widest label (canvas
+//                 measureText, in the axis's own tick font) against the
+//                 axis's real pixel width. No magic constant, and it
+//                 re-derives on every resize like the other adaptations.
+//   3. ROTATE   — last resort only, if fewer than two horizontal labels
+//                 fit at all; then N is recomputed against the (much
+//                 smaller) horizontal footprint of a rotated label.
+const TICK_LABEL_GAP_PX = 10;      // minimum blank space between two labels
+const COLORBAR_RESERVE_PX = 48;    // colorbar + padding, taken out of plot width
+const LAST_RESORT_TICK_ANGLE = 45;
+const FALLBACK_GLYPH_RATIO = 0.6;  // mono glyph width ÷ font size, if measuring fails
+const ISO_WEEK_RE = /^(\d{4})-W(\d{1,2})$/;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}([T ]|$)/;
+
+let measureCtx;
+
+// Build a CSS font shorthand from a Plotly font spec, quoting the
+// multi-word families ("Geist Mono") a canvas font string requires.
+function cssFontShorthand(size, family) {
+  const stack = String(family || "monospace")
+    .split(",")
+    .map((f) => f.trim())
+    .filter(Boolean)
+    .map((f) => (/\s/.test(f) && !/^["']/.test(f) ? `"${f}"` : f))
+    .join(", ");
+  return `${size}px ${stack}`;
+}
+
+// Real measurement, not a character count: the whole point of the thinning
+// is that it holds for whichever font actually loaded.
+function measureLabelPx(label, size, family) {
+  const lines = String(label).split("<br>");
+  if (measureCtx === undefined) {
+    try {
+      measureCtx = document.createElement("canvas").getContext("2d") || null;
+    } catch (err) {
+      measureCtx = null;
+    }
+  }
+  let widest = 0;
+  for (const line of lines) {
+    let w = 0;
+    if (measureCtx) {
+      measureCtx.font = cssFontShorthand(size, family);
+      w = measureCtx.measureText(line).width;
+    }
+    if (!(w > 0)) w = line.length * size * FALLBACK_GLYPH_RATIO; // headless/blocked canvas
+    if (w > widest) widest = w;
+  }
+  return widest;
+}
+
+// The ordered category list for the primary x axis, or null when this
+// chart's x axis isn't a dense string category axis — a numeric axis
+// (horizontal bars), a real date axis (turns per day, tokens by model:
+// Plotly's own date-tick algorithm already picks sensible, non-colliding
+// ticks there), a pie, or anything on a secondary x axis.
+function categoricalXValues(fig) {
+  const seen = new Set();
+  const cats = [];
+  for (const trace of fig.data) {
+    if (!trace || !Array.isArray(trace.x) || trace.x.length === 0) continue;
+    if (trace.xaxis && trace.xaxis !== "x") return null;
+    for (const value of trace.x) {
+      if (typeof value !== "string" || ISO_DATE_RE.test(value)) return null;
+      if (!seen.has(value)) {
+        seen.add(value);
+        cats.push(value);
+      }
+    }
+  }
+  return cats.length ? cats : null;
+}
+
+// "2026-W11" → { short: "W11", year: "2026" }, for a whole axis at once.
+// Returns null unless EVERY category is an ISO week, so a non-week category
+// axis still gets thinned (step 2) without having its labels rewritten.
+function isoWeekLabels(cats) {
+  const short = [];
+  const years = [];
+  const yearOf = [];
+  for (const cat of cats) {
+    const m = ISO_WEEK_RE.exec(cat);
+    if (!m) return null;
+    short.push(`W${m[2].padStart(2, "0")}`);
+    yearOf.push(m[1]);
+    if (!years.includes(m[1])) years.push(m[1]);
+  }
+  return { short, years, yearOf };
+}
+
+function axisTitleWithSuffix(title, suffix) {
+  const isObject = title && typeof title === "object";
+  const text = isObject ? title.text : (typeof title === "string" ? title : "");
+  if (!text || text.includes(suffix)) return title;
+  const stamped = `${text} · ${suffix}`;
+  return isObject ? { ...title, text: stamped } : stamped;
+}
+
+function adaptDenseTicksForWidth(fig, containerWidth) {
+  if (!fig || !fig.layout || !Array.isArray(fig.data) || !(containerWidth > 0)) return fig;
+  const cats = categoricalXValues(fig);
+  if (!cats || cats.length < 2) return fig;
+
+  const axis = fig.layout.xaxis || {};
+  const baseFont = fig.layout.font || {};
+  const tickFont = axis.tickfont || {};
+  // Read the tick font AFTER adaptAxesForWidth may have shrunk it, so the
+  // measurement matches what will actually be drawn.
+  const fontSize = tickFont.size || baseFont.size || 11;
+  const fontFamily = tickFont.family || baseFont.family || "monospace";
+
+  const weeks = isoWeekLabels(cats);
+  const shortLabels = weeks ? weeks.short : cats;
+
+  // Usable axis width = container minus the layout's own side margins,
+  // minus the colorbar strip when the chart has one (the heatmap).
+  const margin = fig.layout.margin || {};
+  const marginL = typeof margin.l === "number" ? margin.l : 56;
+  const marginR = typeof margin.r === "number" ? margin.r : 24;
+  const colorbarPx = fig.data.some(
+    (t) => t && t.showscale !== false && (t.type === "heatmap" || t.colorbar)
+  ) ? COLORBAR_RESERVE_PX : 0;
+  const axisWidth = containerWidth - marginL - marginR - colorbarPx;
+  if (!(axisWidth > 0)) return fig;
+
+  const widestLabelPx = shortLabels.reduce(
+    (max, label) => Math.max(max, measureLabelPx(label, fontSize, fontFamily)), 0
+  );
+  if (!(widestLabelPx > 0)) return fig;
+
+  let tickAngle = 0;
+  let slotPx = widestLabelPx + TICK_LABEL_GAP_PX;
+  if (axisWidth / slotPx < 2) {
+    // Not even two labels fit lying flat — this is the only case where
+    // rotation earns its place. A 45° label's HORIZONTAL footprint is its
+    // line height divided by sin(angle), not its full text width, so far
+    // more of them fit; recompute the step against that instead.
+    tickAngle = LAST_RESORT_TICK_ANGLE;
+    const radians = (LAST_RESORT_TICK_ANGLE * Math.PI) / 180;
+    slotPx = (fontSize * 1.25) / Math.sin(radians);
+  }
+
+  const maxLabels = Math.max(1, Math.floor(axisWidth / slotPx));
+  const step = Math.max(1, Math.ceil(cats.length / maxLabels));
+
+  // Walk back from the newest week so the right-most (most recent) bucket
+  // is always labelled; any dropped labels fall at the old end.
+  const kept = [];
+  for (let i = cats.length - 1; i >= 0; i -= step) kept.push(i);
+  kept.reverse();
+
+  const tickText = kept.map((idx, k) => {
+    const label = shortLabels[idx];
+    if (!weeks || weeks.years.length < 2) return label;
+    const prevYear = k > 0 ? weeks.yearOf[kept[k - 1]] : null;
+    // Stamp the year on the first shown tick of each year, on its own line
+    // so it costs height rather than the width we just spent effort saving.
+    return weeks.yearOf[idx] === prevYear ? label : `${label}<br>${weeks.yearOf[idx]}`;
+  });
+
+  fig.layout.xaxis = {
+    ...axis,
+    tickmode: "array",
+    tickvals: kept.map((i) => cats[i]),
+    ticktext: tickText,
+    tickangle: tickAngle,
+    automargin: axis.automargin === undefined ? true : axis.automargin,
+  };
+
+  if (weeks) {
+    const span = weeks.years.length > 1
+      ? `${weeks.years[0]}–${weeks.years[weeks.years.length - 1]}`
+      : weeks.years[0];
+    fig.layout.xaxis.title = axisTitleWithSuffix(fig.layout.xaxis.title, span);
+  }
+  return fig;
+}
+
 // ── Legend vs. axis-title collision (see charts.py _LEDGER_BASE comment) ──
 // The server ships a fixed-pixel bottom margin plus a fixed-FRACTION
 // legend.y, intended to keep the horizontal legend clear of the x-axis
@@ -616,13 +958,22 @@ async function renderAdapted(divId) {
     const { el, fig } = state;
     const working = JSON.parse(JSON.stringify(fig));
     // The server already painted the layout in Ledger tones — don't override
-    // colors/grid/paper. Title/axis wrapping, category-label truncation, and
-    // legend/margin placement are the responsive exceptions (see the adapt*
-    // functions above), and all are re-derived from the container's CURRENT
-    // measured size on every render, not just the first one.
+    // the paper/plot ground or any DATA colour. Title/axis wrapping,
+    // category-label truncation, x-tick thinning and legend/margin
+    // placement are the responsive exceptions (see the adapt* functions
+    // above), and all are re-derived from the container's CURRENT measured
+    // size on every render, not just the first one. Axis-chrome contrast
+    // and exhibit renumbering are size-independent but re-applied here for
+    // the same reason: `working` is a pristine copy of the server payload
+    // every pass, so nothing is allowed to compound.
+    enhanceChromeContrast(working);
+    renumberExhibit(working, exhibitNumberFor(divId));
     adaptTitleForWidth(working, el.clientWidth);
     adaptAxesForWidth(working, el.clientWidth);
     adaptCategoryLabelsForWidth(working, el.clientWidth);
+    // After adaptAxesForWidth (which can shrink the tick font we measure),
+    // before the legend pass (which only ever touches margin.b).
+    adaptDenseTicksForWidth(working, el.clientWidth);
     adaptLegendForHeight(working, el.clientWidth, el.clientHeight);
     await reactToLayoutSafely(el, working);
     await reconcileLegendPlacement(el, working);
