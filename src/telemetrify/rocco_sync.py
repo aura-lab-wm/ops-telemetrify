@@ -297,20 +297,44 @@ print(json.dumps({"sha256": h.hexdigest(),
 """
 
 
+# A slice travels as <name>.part and gets its final name only once Rocco's copy
+# checks out, so a name in archive/ always means a complete, verified slice.
+PART = ".part"
+# Give up on a link that sends nothing for this long; the next tick retries.
+UPLOAD_IO_TIMEOUT_S = 120
+
+
+def _remote(cmd: str, timeout: float = 30) -> subprocess.CompletedProcess:
+    return _run(["ssh", *_ssh_opts(), ssh_host(), cmd], timeout=timeout)
+
+
 def upload_slice(path: Path) -> None:
-    cp = _run(["ssh", *_ssh_opts(), ssh_host(), f"mkdir -p {store_dir()} && mkdir -p -m 700 {store_dir()}/archive"], timeout=15)
+    cp = _remote(f"mkdir -p {store_dir()} && mkdir -p -m 700 {store_dir()}/archive")
     if cp.returncode != 0:
         raise RoccoSyncError(f"remote mkdir archive failed ({cp.returncode}): {cp.stderr.strip()}")
     transport = "ssh " + " ".join(_ssh_opts())
-    cp = _run(["rsync", "-a", "--partial", "-e", transport, str(path),
-               f"{ssh_host()}:{store_dir()}/archive/{path.name}"], timeout=3600)
+    # No --partial: an interrupted transfer leaves no file under any slice name.
+    cp = _run(["rsync", "-a", f"--timeout={UPLOAD_IO_TIMEOUT_S}", "-e", transport, str(path),
+               f"{ssh_host()}:{store_dir()}/archive/{path.name}{PART}"], timeout=3600)
     if cp.returncode != 0:
+        discard_remote_part(path.name)
         raise RoccoSyncError(f"slice upload failed ({cp.returncode}): {cp.stderr.strip()[-300:]}")
 
 
+def discard_remote_part(name: str) -> None:
+    _remote(shlex.join(["rm", "-f", _remote_path(f"archive/{name}{PART}")]))
+
+
+def publish_remote_slice(name: str) -> None:
+    src, dst = _remote_path(f"archive/{name}{PART}"), _remote_path(f"archive/{name}")
+    cp = _remote(shlex.join(["mv", "-n", src, dst]))
+    if cp.returncode != 0:
+        raise RoccoSyncError(f"remote rename failed ({cp.returncode}): {cp.stderr.strip()}")
+
+
 def verify_remote_slice(name: str) -> dict:
-    """SHA-256, quick_check and turn count of the slice as Rocco reads it."""
-    remote = shlex.join(["python3", "-c", _VERIFY_SCRIPT, _remote_path(f"archive/{name}")])
+    """SHA-256, quick_check and turn count of the uploaded slice as Rocco reads it."""
+    remote = shlex.join(["python3", "-c", _VERIFY_SCRIPT, _remote_path(f"archive/{name}{PART}")])
     cp = _run(["ssh", *_ssh_opts(), ssh_host(), remote], timeout=600)
     if cp.returncode != 0:
         raise RoccoSyncError(f"remote verify failed ({cp.returncode}): {cp.stderr.strip()[-300:]}")
@@ -342,8 +366,10 @@ def archive_if_over_cap(*, db_path: Path | None = None, dry_run: bool = False) -
             remote = verify_remote_slice(name)
             if (remote.get("sha256") != sha or remote.get("check") != "ok"
                     or remote.get("turns") != counts["turns"]):
+                discard_remote_part(name)
                 raise RoccoSyncError(f"remote slice does not match: {remote} vs sha={sha} "
                                      f"turns={counts['turns']}")
+            publish_remote_slice(name)
             deleted = archive.delete_archived(conn, ids, counts)
             shrunk = archive.shrink(conn)
         finally:
