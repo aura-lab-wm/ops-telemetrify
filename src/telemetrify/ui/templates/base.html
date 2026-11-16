@@ -9,9 +9,9 @@
   <meta property="og:title" content="telemetrify">
   <meta property="og:description" content="Per-prompt telemetry for Claude Code · local-first">
   <meta property="og:image" content="/static/og-image.png">
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="alternate icon" href="/static/favicon.ico">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" type="image/svg+xml" href="{{ asset('favicon.svg') }}">
+  <link rel="alternate icon" href="{{ asset('favicon.ico') }}">
+  <link rel="stylesheet" href="{{ asset('app.css') }}">
 </head>
 <body class="{% block body_class %}v-page{% endblock %}">
   {% include "_icons.html" %}
@@ -96,7 +96,7 @@
       });
     })();
   </script>
-  <script src="/static/utils.js"></script>
-  <script src="/static/pulse.js"></script>
+  <script src="{{ asset('utils.js') }}"></script>
+  <script src="{{ asset('pulse.js') }}"></script>
 </body>
 </html>

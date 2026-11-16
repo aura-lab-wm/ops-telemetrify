@@ -1,0 +1,4 @@
+#!/bin/sh
+# ssh with the sync's options, for tools that take only a program name (sqlite3_rsync --ssh).
+# shellcheck disable=SC2086
+exec ssh ${ROCCO_SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=4} "$@"

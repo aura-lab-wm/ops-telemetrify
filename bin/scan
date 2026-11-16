@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Pull turns from the agents that cannot push them (see src/telemetrify/scan.py).
+# HF_HUB_OFFLINE: the embedder's weights are cached locally, but sentence-transformers
+# still does a Hub revision check on load, which stalls behind a proxy and blocks the
+# whole scan with zero CPU. The weights are on disk; do not ask the network about them.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+exec .venv/bin/python -m telemetrify.scan "$@"

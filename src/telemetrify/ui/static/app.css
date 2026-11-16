@@ -6,6 +6,7 @@
    ─────────────────────────────────────────────────────────────────── */
 @import url("https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap");
 @import url("https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap");
 
 :root {
   /* ── Telemetry · Vercel Mode — applied globally ───────────────────── */
@@ -34,8 +35,8 @@
 
   /* typography — Geist everywhere, no serifs */
   --font-serif:  "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-  --font-sans:   "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-  --font-mono:   "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+  --font-sans:   "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-mono:   "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   /* spacing — 4px base scale */
   --s-1: 4px;  --s-2: 8px;  --s-3: 12px;  --s-4: 16px;  --s-5: 20px;
@@ -223,7 +224,7 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .session-list li:last-child { border-bottom: 0; }
 .session-list a { display: block; padding: 8px 6px; color: var(--text); }
 .session-list a:hover { background: var(--panel-2); text-decoration: none; }
-.sid { font-family: "SF Mono", monospace; color: var(--accent); }
+.sid { font-family: var(--font-mono); color: var(--accent); }
 .session-list .meta { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
 .session-list .cwd { display: block; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
@@ -234,8 +235,8 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 }
 .turn-card header { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; flex-wrap: wrap; }
 .turn-link { font-weight: 600; }
-.ts { color: var(--muted); font-size: 12px; font-family: "SF Mono", monospace; }
-.score { color: var(--warn); font-size: 12px; font-family: "SF Mono", monospace; }
+.ts { color: var(--muted); font-size: 12px; font-family: var(--font-mono); }
+.score { color: var(--warn); font-size: 12px; font-family: var(--font-mono); }
 .model { color: var(--muted); font-size: 12px; margin-left: auto; }
 .prompt { font-weight: 500; margin: 4px 0; }
 .response { color: var(--muted); font-size: 13px; }
@@ -344,7 +345,7 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
   background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 5px;
   padding: 6px 9px; font: inherit; font-size: 13px;
 }
-.annotation-form textarea { font-family: "SF Mono", ui-monospace, monospace; resize: vertical; }
+.annotation-form textarea { font-family: var(--font-mono); resize: vertical; }
 .rating-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; }
 .rating-row .r {
   display: inline-flex; align-items: center; gap: 7px;
@@ -407,9 +408,9 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 }
 .cluster-list .cluster-link em { font-style: normal; color: var(--muted); font-weight: 400; }
 .cluster-list .cluster-link .icon { color: currentColor; }
-.cluster-list .cluster-label { margin: 6px 0 4px; font-family: "SF Mono", ui-monospace, monospace; font-size: 13px; color: var(--text); }
+.cluster-list .cluster-label { margin: 6px 0 4px; font-family: var(--font-mono); font-size: 13px; color: var(--text); }
 .cluster-list .meta { color: var(--muted); font-size: 12px; }
-.cluster-label { font-family: "SF Mono", ui-monospace, monospace; font-size: 14px; }
+.cluster-label { font-family: var(--font-mono); font-size: 14px; }
 
 
 /* ---------- dashboard ---------- */
@@ -434,7 +435,7 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .similar-sidebar h3 { margin-top: 0; }
 .similar-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 .similar-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; }
-.similar-card .dist { margin-left: 8px; color: var(--warn); font-size: 11px; font-family: "SF Mono", monospace; }
+.similar-card .dist { margin-left: 8px; color: var(--warn); font-size: 11px; font-family: var(--font-mono); }
 .similar-card .snippet { font-size: 13px; color: var(--text); margin: 4px 0; }
 .similar-card footer { font-size: 11px; color: var(--muted); margin-top: 4px; }
 
@@ -465,7 +466,7 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .rerun-meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
 .rerun-error pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; overflow: auto; font-size: 12px; max-height: 240px; white-space: pre-wrap; word-break: break-word; }
 
-.status-badge { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 11px; font-family: "SF Mono", monospace; }
+.status-badge { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 11px; font-family: var(--font-mono); }
 .status-badge.success     { background: var(--accent-2); color: #0c1224; }
 .status-badge.failure     { background: #ff7676; color: #200; }
 .status-badge.over_budget { background: var(--warn); color: #1a1206; }
@@ -477,12 +478,12 @@ main { padding: 20px; max-width: 1400px; margin: 0 auto; }
 .delta-row { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .delta-row .orig  { color: var(--muted); }
 .delta-row .rerun b { color: var(--text); }
-.delta-arrow { margin-left: 6px; font-size: 11px; font-family: "SF Mono", monospace; padding: 0 5px; border-radius: 3px; }
+.delta-arrow { margin-left: 6px; font-size: 11px; font-family: var(--font-mono); padding: 0 5px; border-radius: 3px; }
 .delta-arrow.up   { color: #ff7676; border: 1px solid #ff7676; }
 .delta-arrow.down { color: var(--accent-2); border: 1px solid var(--accent-2); }
 
 .diff-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 14px; }
-table.diff { border-collapse: collapse; width: 100%; font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; color: var(--text); }
+table.diff { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: 12px; color: var(--text); }
 table.diff td { padding: 2px 6px; vertical-align: top; }
 table.diff td.diff_header { color: var(--muted); text-align: right; user-select: none; background: var(--panel-2); }
 table.diff td.diff_next { color: var(--muted); }
@@ -533,8 +534,8 @@ body.v-page {
   --vtint-grad-1:  rgba(255, 92, 0, 0.06);
   --vtint-grad-2:  rgba(255, 92, 0, 0.01);
 
-  --vfont-sans:    "Geist", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-  --vfont-mono:    "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+  --vfont-sans:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --vfont-mono:    "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --vradius-1: 4px; --vradius-2: 6px; --vradius-3: 8px; --vradius-4: 12px;
 
@@ -1583,6 +1584,29 @@ body.v-page .plate::before {
   opacity: 0.7;
 }
 body.v-page .plate.wide::before { width: 56px; opacity: 1; }
+
+/* ── Plotly chart chrome ────────────────────────────────────────────────
+   Plotly draws tick labels, axis titles and gridlines as SVG with inline
+   fills, so a normal CSS rule can't reach them without !important fighting
+   the library. dashboard.js sets them on the figure layout instead, and
+   reads the values from here (enhanceChromeContrast → chartChrome) so the
+   chart chrome stays part of the page's own ink scale rather than drifting
+   into a second, private palette.
+
+   These are one step up the same zinc ramp as --ink/--ink-mid/--ink-low:
+   charts.py ships tick labels at --ink-mid and axis titles at --ink-low
+   (~4:1 on the #0a0a0a plate), which at 10-11px on a near-black ground is
+   below comfortable reading contrast. Gridlines go 5% → 10% white: still
+   clearly recessive against the data, but actually present. Data colours
+   (the orange/red colorway, the heatmap scale) are NOT set here — those
+   stay entirely the server's. */
+body.v-page {
+  --chart-tick:       #d4d4d8;                /* tick labels     ~13:1 on --panel */
+  --chart-axis-title: #e4e4e7;                /* axis titles     ~15:1 on --panel */
+  --chart-grid:       rgba(255, 255, 255, 0.10);
+  --chart-axis-line:  rgba(255, 255, 255, 0.22);
+  --chart-zero-line:  rgba(255, 255, 255, 0.16);
+}
 
 body.v-page .chart {
   width: 100%; min-width: 0;

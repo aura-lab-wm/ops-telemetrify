@@ -118,6 +118,7 @@
     <span class="rule"></span>
     <span class="footer-text">
       Ledger compiled from <code class="mono" id="footer-sessions">—</code> sessions ·
+      <span id="footer-archive" hidden></span>
       <a href="/api/export?format=jsonl">export jsonl</a> ·
       <a href="/api/export?format=csv">export csv</a> ·
       <a href="/api/health">/api/health</a>
@@ -132,8 +133,8 @@
 </section>
 
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<script src="/static/dashboard.js"></script>
-<script src="/static/push-client.js"></script>
+<script src="{{ asset('dashboard.js') }}"></script>
+<script src="{{ asset('push-client.js') }}"></script>
 <script>
   // Daily-digest banner — show today's summary if generated.
   (async () => {

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.amastropaolo.telemetrify-scan</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/amastro/Projects/telemetrify/bin/scan</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/amastro/Projects/telemetrify</string>
+  <!-- Every 30 minutes. A no-op scan across 2,331 files measures 0.4s, so the
+       cost of being wrong about the interval is nil, while the cost of being
+       too slow is turns that sit uncaptured until the next fire. -->
+  <key>StartInterval</key><integer>1800</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/Users/amastro/Projects/telemetrify/data/scan.log</string>
+  <key>StandardErrorPath</key><string>/Users/amastro/Projects/telemetrify/data/scan.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HF_HUB_OFFLINE</key><string>1</string>
+    <key>TRANSFORMERS_OFFLINE</key><string>1</string>
+  </dict>
+</dict>
+</plist>

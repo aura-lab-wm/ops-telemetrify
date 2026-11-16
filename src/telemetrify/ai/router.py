@@ -344,7 +344,26 @@ class BackendRouter:
             except Exception as _e:
                 _log(f"skip {backend_name}: is_available() raised {_e}")
                 continue
-            _log(f"try {backend_name} ({model})")
+            # Each backend answers with ITS OWN model. `model` is the
+            # FEATURE's choice and is spelled in Anthropic's vocabulary
+            # ("claude-sonnet-4-6"); sending that verbatim down the fallback
+            # chain asks a vLLM box and a local Ollama for a model neither has
+            # ever heard of. That is not hypothetical — it is why every
+            # cluster-label call failed:
+            #
+            #   [router] try rocco    (claude-sonnet-4-6)   -> unknown model
+            #   [router] try localmac (claude-sonnet-4-6)   -> 500
+            #   all backends failed; last error: 500 from localmac
+            #
+            # and why 846 of 851 clusters had no auto_label. The tier exists to
+            # serve the same REQUEST on different hardware, so the model name
+            # belongs to the backend, not to the caller. Anthropic keeps the
+            # caller's model because there the name IS the routing decision and
+            # the budget estimate is priced against it.
+            backend_model = model
+            if backend_name != "anthropic":
+                backend_model = getattr(backend, "default_model", None) or model
+            _log(f"try {backend_name} ({backend_model})")
 
             # Budget check only applies to Anthropic (local tiers are ~free).
             if backend_name == "anthropic":
@@ -366,7 +385,7 @@ class BackendRouter:
                 )  # raises BudgetExceeded
             else:
                 run_id, _started = self._insert_pending(
-                    feature=feature, model=model,
+                    feature=feature, model=backend_model,
                     prompt_version=template.version, target_id=target_id,
                     backend_name=backend_name,
                 )
@@ -374,7 +393,7 @@ class BackendRouter:
             t0 = time.monotonic()
             try:
                 resp: BackendResponse = backend.complete(
-                    system=system, user=user, model=model,
+                    system=system, user=user, model=backend_model,
                     max_tokens=max_tokens, json_schema=schema,
                     timeout=timeout,
                 )

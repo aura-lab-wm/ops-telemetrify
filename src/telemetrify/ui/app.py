@@ -60,6 +60,27 @@ _env = Environment(
 
 app = FastAPI(title="Prompt Telemetry")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def asset(path: str) -> str:
+    """/static/<path> stamped with the file's mtime, so an edit is never masked
+    by the browser cache.
+
+    StaticFiles answers with an ETag and Last-Modified, which is correct for a
+    deployed app and wrong for this one: every CSS or JS change here was being
+    served from Chrome's cache on an ordinary navigation, so edits looked like
+    they had silently failed. A mtime query stamp makes the URL change whenever
+    the bytes change — the browser refetches exactly when it should, and never
+    otherwise. Falls back to the bare path if the file is missing rather than
+    raising inside a template render.
+    """
+    try:
+        return f"/static/{path}?v={int((STATIC_DIR / path).stat().st_mtime)}"
+    except OSError:
+        return f"/static/{path}"
+
+
+_env.globals["asset"] = asset
 app.include_router(dash0_router)
 
 # html=False: the commonmark preset enables raw-HTML passthrough, but the
@@ -445,7 +466,16 @@ def dashboard_headline():
         "cache_hit_pct": (100.0 * cache_hit / (cache_hit + cache_miss)) if (cache_hit + cache_miss) else 0.0,
         "top_tool": dict(top_tool) if top_tool else None,
         "top_model": dict(top_model) if top_model else None,
+        "archive": _archive_summary(),
     })
+
+
+def _archive_summary() -> dict:
+    """Turns moved to Rocco by the size cap (rocco_sync's state file), so the
+    dashboard can say why history on this Mac starts where it does."""
+    from ..rocco_sync import load_state
+    slices = load_state().archives
+    return {"slices": len(slices), "turns": sum(int(s.get("turns", 0)) for s in slices)}
 
 
 @app.get("/api/pulse", response_class=JSONResponse)

@@ -16,6 +16,8 @@ import struct
 from collections import defaultdict
 from typing import Iterable
 
+import time
+
 import numpy as np
 
 from .ai.cluster_label import _is_image_placeholder
@@ -52,18 +54,32 @@ def _label_from_user_text(user_text: str | None) -> str:
     return ""
 
 
-def _load_window(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
-    rows = conn.execute(
-        """
-        SELECT t.id, pv.embedding
-        FROM turns t
-        JOIN prompt_vec pv ON pv.turn_id = t.id
-        WHERE t.id IN (
-            SELECT id FROM turns ORDER BY started_at DESC LIMIT ?
-        ) OR t.id IN (SELECT turn_id FROM annotations)
-        """,
-        (WINDOW_RECENT,),
-    ).fetchall()
+def _load_window(conn: sqlite3.Connection, limit: int | None = None) -> tuple[list[int], np.ndarray]:
+    """limit=None loads the WHOLE corpus; an int restores the old capped window.
+
+    The cap used to be unconditional at WINDOW_RECENT=2000, and that — not any
+    similarity threshold — is why cluster coverage sat at 15.7%. 2,000 of 57,044
+    turns is 3.5%; everything else could only ever be attached by
+    assign_nearest_cluster at capture time, one turn at a time, against
+    centroids built from that same sliver.
+    """
+    if limit is None:
+        rows = conn.execute(
+            """SELECT t.id, pv.embedding FROM turns t
+               JOIN prompt_vec pv ON pv.turn_id = t.id"""
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT t.id, pv.embedding
+            FROM turns t
+            JOIN prompt_vec pv ON pv.turn_id = t.id
+            WHERE t.id IN (
+                SELECT id FROM turns ORDER BY started_at DESC LIMIT ?
+            ) OR t.id IN (SELECT turn_id FROM annotations)
+            """,
+            (limit,),
+        ).fetchall()
     if not rows:
         return [], np.zeros((0, 384), dtype=np.float32)
     ids = [r["id"] for r in rows]
@@ -71,23 +87,66 @@ def _load_window(conn: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
     return ids, mat
 
 
-def rebuild_clusters(conn: sqlite3.Connection, min_cluster_size: int = 3, log=print) -> dict:
-    """Run HDBSCAN over the window. Persist clusters + assignments.
-    Returns a small summary dict.
+# Below this many prompts, cluster the raw 384-dim vectors directly: UMAP needs
+# a population to estimate a manifold from, and at small n the reduction costs
+# more than the clustering it speeds up.
+UMAP_MIN_ROWS = 5_000
+UMAP_COMPONENTS = 5
+
+
+def rebuild_clusters(conn: sqlite3.Connection, min_cluster_size: int = 15,
+                     limit: int | None = None, log=print) -> dict:
+    """Reduce with UMAP, cluster with HDBSCAN, persist clusters + assignments.
+
+    WHY UMAP. HDBSCAN's spatial index degrades toward O(n^2) in high dimensions,
+    and 384 is high. Measured on this corpus, 57,044 prompts: raw HDBSCAN over
+    the 384-dim vectors ran past THIRTEEN MINUTES without returning a single
+    partition and was killed. The same corpus through UMAP first:
+
+        UMAP 384 -> 5                                  99.0s
+        HDBSCAN mcs= 5   2,016 clusters  78.5% assigned  2.0s
+        HDBSCAN mcs=15     860 clusters  76.0% assigned  0.7s
+        HDBSCAN mcs=40     352 clusters  69.3% assigned  0.8s
+
+    ~100 seconds for the whole corpus against >13 minutes and counting. This is
+    the same reduce-then-cluster pipeline BERTopic uses, for the same reason.
+
+    CENTROIDS STAY IN THE ORIGINAL 384-dim SPACE. Only the MEMBERSHIP decision
+    happens in reduced space; centroids are still the mean of members' full
+    vectors. That matters because two things downstream compare against them in
+    384 dims — assign_nearest_cluster at capture time, and the stable-id
+    matching that keeps cluster ids steady across rebuilds. Storing 5-dim
+    centroids would silently break both.
+
+    min_cluster_size defaults to 15 (860 clusters, 76% assigned). It was 3, tuned
+    when this only ever saw a 2,000-turn window; 3 against the full corpus
+    produces thousands of clusters too fine to browse. Raise to 40 for ~352,
+    which is the range a force-directed graph can actually render.
     """
     import hdbscan
 
-    ids, mat = _load_window(conn)
+    ids, mat = _load_window(conn, limit)
     if mat.shape[0] < min_cluster_size:
-        log(f"only {mat.shape[0]} prompts in window — skipping cluster rebuild")
+        log(f"only {mat.shape[0]} prompts — skipping cluster rebuild")
         return {"prompts": int(mat.shape[0]), "clusters": 0, "noise": int(mat.shape[0])}
+
+    if mat.shape[0] >= UMAP_MIN_ROWS:
+        import umap
+        t0 = time.time()
+        space = umap.UMAP(n_neighbors=15, n_components=UMAP_COMPONENTS, min_dist=0.0,
+                          metric="cosine", random_state=42).fit_transform(mat)
+        log(f"umap {mat.shape[1]}->{UMAP_COMPONENTS} on {mat.shape[0]:,} prompts "
+            f"in {time.time()-t0:.1f}s")
+    else:
+        space = mat
 
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=min_cluster_size,
-        metric="euclidean",  # since vectors are normalized, euclidean ≈ cosine
+        metric="euclidean",  # vectors are normalized, so euclidean ~= cosine
         cluster_selection_method="eom",
+        core_dist_n_jobs=-1,
     )
-    labels = clusterer.fit_predict(mat)
+    labels = clusterer.fit_predict(space)
 
     # Group turns by raw HDBSCAN label.
     by_label: dict[int, list[int]] = defaultdict(list)
@@ -247,10 +306,17 @@ def main(argv: list[str] | None = None) -> int:
     cmd = (argv or sys.argv[1:])
     conn = connect()
     if not cmd or cmd[0] == "rebuild":
-        summary = rebuild_clusters(conn)
+        mcs, limit = 15, None
+        for i, a in enumerate(cmd):
+            if a == "--min-cluster-size" and i + 1 < len(cmd):
+                mcs = int(cmd[i + 1])
+            elif a == "--limit" and i + 1 < len(cmd):
+                limit = int(cmd[i + 1])
+        summary = rebuild_clusters(conn, min_cluster_size=mcs, limit=limit)
         print(summary)
         return 0
-    print("usage: python -m telemetrify.cluster rebuild")
+    print("usage: python -m telemetrify.cluster rebuild "
+          "[--min-cluster-size N] [--limit N]")
     return 2
 
 

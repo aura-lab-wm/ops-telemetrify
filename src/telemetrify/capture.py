@@ -9,6 +9,8 @@ from . import LOG_PATH, DATA_DIR
 from .db import connect
 from .store import upsert_session, insert_turn, record_ingest_run
 from .transcript import parse_latest_turn
+from .agents.grok import is_grok_path, session_dir_for as grok_session_dir
+from .agents.registry import detect_agent, parser_for
 
 
 def _log(msg: str) -> None:
@@ -18,11 +20,41 @@ def _log(msg: str) -> None:
         f.write(f"[{ts}] {msg}\n")
 
 
-def _resolve_transcript(payload: dict) -> Path | None:
-    explicit = payload.get("transcript_path")
-    if explicit and Path(explicit).exists():
-        return Path(explicit)
-    session_id = payload.get("session_id") or payload.get("conversation_id")
+def _payload_get(payload: dict, *names: str):
+    """Hook payload keys are not spelled the same by every CLI.
+
+    Claude Code sends snake_case (transcript_path, session_id); grok sends
+    camelCase (transcriptPath, sessionId, hookEventName, workspaceRoot). This
+    function read only the snake_case spellings, so every grok payload fell
+    through to a ~/.claude/projects glob that could never match a grok session
+    id — 3,807 dropped payloads, 97% of capture.log, each one naming a
+    transcript that existed on disk the whole time.
+    """
+    for n in names:
+        v = payload.get(n)
+        if v:
+            return v
+    return None
+
+
+def _resolve_transcript(payload: dict) -> tuple[Path, str] | None:
+    """Return (path_or_session_dir, agent), or None.
+
+    For grok the returned path is the session DIRECTORY, not the file the
+    payload names: `transcriptPath` points at updates.jsonl, which is a
+    JSON-RPC event stream ({timestamp, method, params}), not a transcript. The
+    conversation is the sibling chat_history.jsonl. See agents/grok.py.
+    """
+    explicit = _payload_get(payload, "transcript_path", "transcriptPath")
+    if explicit:
+        p = Path(explicit)
+        if is_grok_path(p):
+            d = grok_session_dir(p)
+            if d is not None:
+                return d, "grok"
+        if p.exists():
+            return p, detect_agent(p)
+    session_id = _payload_get(payload, "session_id", "sessionId", "conversation_id", "conversationId")
     if not session_id:
         return None
     root = Path.home() / ".claude" / "projects"
@@ -30,7 +62,7 @@ def _resolve_transcript(payload: dict) -> Path | None:
     if not matches:
         return None
     matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return matches[0]
+    return matches[0], "claude_code"
 
 
 def _detect_origin(payload: dict) -> str:
@@ -62,14 +94,17 @@ def main() -> int:
         return 0
 
     try:
-        transcript_path = _resolve_transcript(payload)
-        if transcript_path is None:
+        resolved = _resolve_transcript(payload)
+        if resolved is None:
             _log(f"no transcript for payload: {payload}")
             return 0
+        transcript_path, agent = resolved
 
-        turn = parse_latest_turn(transcript_path)
+        parse = parser_for(agent)
+        turn = parse(transcript_path) if parse else parse_latest_turn(transcript_path)
         if turn is None:
             return 0
+        turn.agent = agent
 
         conn = connect()
         turn_id = None

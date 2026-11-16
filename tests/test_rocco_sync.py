@@ -248,6 +248,7 @@ def test_push_snapshots_rsyncs_and_writes_manifest(tmp_path, monkeypatch):
         d.write_bytes(b"snapshot-bytes")
         return d
     monkeypatch.setattr(rs, "make_snapshot", fake_snapshot)
+    monkeypatch.setattr(rs, "sqlite3_rsync_path", lambda: None)
     monkeypatch.setenv("ROCCO_SSH_HOST", "rocco")
     monkeypatch.setenv("ROCCO_STORE_DIR", "~/telemetrify-store")
 
@@ -270,6 +271,7 @@ def test_push_raises_when_rsync_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(rs, "DB_PATH", db)
     monkeypatch.setattr(rs, "make_snapshot",
                         lambda db_path=None, dest=None: db)  # reuse existing file
+    monkeypatch.setattr(rs, "sqlite3_rsync_path", lambda: None)
 
     def run(cmd, timeout=None):
         # ssh mkdir ok, rsync fails

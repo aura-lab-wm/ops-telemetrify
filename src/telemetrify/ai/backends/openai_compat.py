@@ -183,6 +183,21 @@ class OpenAICompatBackend:
             ],
             "max_tokens": max_tokens,
         }
+        if self.name == "rocco":
+            # rocco serves a REASONING model, and every cluster-label call was
+            # failing on it with `bad JSON: no JSON object in response` — the
+            # model narrates a <think> block before the JSON and the parser
+            # sees prose first. chat_template_kwargs is vLLM's passthrough into
+            # the chat template; Qwen3's template omits the block entirely when
+            # enable_thinking is false.
+            #
+            # Measured against this same vLLM box on a 250-message batch:
+            # 40,000 output tokens (ceiling, unparseable) -> 9,141, and 595s ->
+            # 136.5s. Labelling a cluster is classification, not reasoning, and
+            # a 4-batch A/B on real data agreed 94.6% with thinking ON while
+            # being the only DETERMINISTIC of the two — thinking bought
+            # variance, not accuracy.
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         if json_schema is not None:
             if self.name == "rocco":
                 # The rocco tier speaks vLLM's OpenAI-compat server — see the
