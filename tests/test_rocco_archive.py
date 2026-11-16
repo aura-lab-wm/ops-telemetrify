@@ -76,10 +76,10 @@ def seeded(migrated_db, tmp_path, monkeypatch):
     monkeypatch.setattr(rs, "STATE_PATH", tmp_path / "state.json")
 
     def fake_upload(path: Path) -> None:
-        shutil.copy(path, remote / path.name)
+        shutil.copy(path, remote / (path.name + rs.PART))
 
     def fake_verify(name: str) -> dict:
-        p = remote / name
+        p = remote / (name + rs.PART)
         c = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
         try:
             return {"sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
@@ -90,6 +90,10 @@ def seeded(migrated_db, tmp_path, monkeypatch):
 
     monkeypatch.setattr(rs, "upload_slice", fake_upload)
     monkeypatch.setattr(rs, "verify_remote_slice", fake_verify)
+    monkeypatch.setattr(rs, "publish_remote_slice",
+                        lambda name: (remote / (name + rs.PART)).rename(remote / name))
+    monkeypatch.setattr(rs, "discard_remote_part",
+                        lambda name: (remote / (name + rs.PART)).unlink(missing_ok=True))
     return {"conn": migrated_db, "ids": ids, "db": db_path, "remote": remote}
 
 
@@ -168,6 +172,26 @@ def test_nothing_is_deleted_when_rocco_copy_differs(seeded, monkeypatch):
     with pytest.raises(rs.RoccoSyncError):
         rs.archive_if_over_cap(db_path=seeded["db"])
     assert conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 9
+    assert list(seeded["remote"].iterdir()) == []
+
+
+def test_upload_never_leaves_a_file_under_a_slice_name(tmp_path, monkeypatch):
+    from telemetrify import rocco_sync as rs
+    calls = []
+
+    def run(cmd, timeout=None):
+        calls.append(cmd)
+        rc = 30 if cmd[0] == "rsync" else 0  # rsync: I/O timeout on a stalled link
+        return subprocess.CompletedProcess(cmd, rc, "", "timeout in data send/receive")
+    monkeypatch.setattr(rs, "_run", run)
+    slice_path = tmp_path / "turns-2026-01-01_2026-02-01-5-20261116T0800Z.db"
+    slice_path.write_bytes(b"x")
+    with pytest.raises(rs.RoccoSyncError):
+        rs.upload_slice(slice_path)
+    rsync = next(c for c in calls if c[0] == "rsync")
+    assert "--partial" not in rsync and "--timeout=120" in rsync
+    assert rsync[-1].endswith(slice_path.name + ".part")
+    assert any(c[0] == "ssh" and "rm -f" in c[-1] and ".part" in c[-1] for c in calls)
 
 
 def test_nothing_is_deleted_when_upload_fails(seeded, monkeypatch):
