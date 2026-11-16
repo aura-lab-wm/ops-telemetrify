@@ -154,6 +154,14 @@ function renderFooter(h) {
   const el = document.getElementById("footer-sessions");
   if (!el) return;
   el.textContent = formatWithCommas(h.sessions);
+  // Older turns live on Rocco once the local DB passes its size cap.
+  const arch = document.getElementById("footer-archive");
+  if (arch && h.archive && h.archive.turns > 0) {
+    const since = h.first_at ? String(h.first_at).slice(0, 10) : "";
+    arch.textContent = `${formatWithCommas(h.archive.turns)} older turns archived on rocco` +
+      (since ? ` (this Mac keeps ${since} onward)` : "") + " ·";
+    arch.hidden = false;
+  }
 }
 
 async function loadHeadline() {

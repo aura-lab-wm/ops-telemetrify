@@ -227,6 +227,11 @@ PORT=9000 bin/telemetry-ui    # custom port
 - `/api/health` — JSON form for dashboard banner.
 - Migration framework — numbered SQL + Python files in `migrations/`, applied via fcntl-locked runner; destructive migrations take an automatic file backup.
 
+### Rocco replica and the 5 GB cap
+- `bin/rocco-sync tick` (launchd, every 5 min) keeps `~/telemetrify-store/prompts.db` on Rocco a copy of the local DB. It uses SQLite's `sqlite3_rsync` (in `~/.local/bin` on both machines), which sends only changed pages and needs no local copy; without it, a compact `VACUUM INTO` snapshot is rsynced and always deleted.
+- When the local DB holds more than `TELEMETRIFY_LOCAL_CAP_GB` (default 5) GiB of data, the oldest turns move to `~/telemetrify-store/archive/` on Rocco: one self-contained SQLite file per run with the turns, every row that hangs off them, their vectors (float32 BLOBs) and the pointers that were nulled. A slice is checked on Rocco (SHA-256, `quick_check`, turn count) before anything local is deleted, then the local file shrinks (incremental auto-vacuum).
+- `bin/rocco-sync status` shows the live size, the cap and the archived slices; `bin/rocco-sync archive --dry-run` shows what would move. The dashboard footer says how many turns are on Rocco.
+
 ### Cloud-sync scaffold (stub)
 - `bin/sync --target postgresql://... --dry-run` dialect-translates all migrations to Postgres + pgvector (`BIGSERIAL`, `vector(384)`, FTS→tsvector TODO).
 - Writes raise `NotImplementedError` with a credential-masked DSN — wire-up is the only deferred work.

@@ -466,7 +466,16 @@ def dashboard_headline():
         "cache_hit_pct": (100.0 * cache_hit / (cache_hit + cache_miss)) if (cache_hit + cache_miss) else 0.0,
         "top_tool": dict(top_tool) if top_tool else None,
         "top_model": dict(top_model) if top_model else None,
+        "archive": _archive_summary(),
     })
+
+
+def _archive_summary() -> dict:
+    """Turns moved to Rocco by the size cap (rocco_sync's state file), so the
+    dashboard can say why history on this Mac starts where it does."""
+    from ..rocco_sync import load_state
+    slices = load_state().archives
+    return {"slices": len(slices), "turns": sum(int(s.get("turns", 0)) for s in slices)}
 
 
 @app.get("/api/pulse", response_class=JSONResponse)

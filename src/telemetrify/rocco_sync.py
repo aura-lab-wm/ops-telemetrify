@@ -20,9 +20,17 @@ local DB is missing/empty on startup, pull the snapshot back down from Rocco so
 general ("whole-corpus") queries have history to search. It refuses to clobber a
 present local DB unless `--force`.
 
-Transport: `rsync -a --partial --inplace` over ssh to `$ROCCO_SSH_HOST`
-(default "rocco") at `$ROCCO_STORE_DIR` (default "~/telemetrify-store"). rsync's
-block-delta keeps repeat pushes cheap even though the DB is ~1.4 GB.
+Transport: `sqlite3_rsync` (SQLite's own replication tool) over ssh to
+`$ROCCO_SSH_HOST` (default "rocco") at `$ROCCO_STORE_DIR` (default
+"~/telemetrify-store"). It reads the live DB in one read transaction and sends
+only the pages that differ, so a push needs no local copy. Without the tool on
+the Mac, the fallback writes one compact snapshot with VACUUM INTO, rsyncs it
+and always deletes it.
+
+Size cap: after each tick, if the local DB holds more than
+`$TELEMETRIFY_LOCAL_CAP_GB` (default 5) GiB of data, the oldest turns move to
+`$ROCCO_STORE_DIR/archive/` (see telemetrify.rocco_archive). Archive slices are
+never rewritten, so they keep the turns the replica no longer has.
 
 Every ssh/rsync call funnels through the single `_run` seam so tests can stub
 the network entirely.
@@ -30,17 +38,21 @@ the network entirely.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import json
 import os
+import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import DATA_DIR, DB_PATH
+from . import DATA_DIR, DB_PATH, ROOT
+from . import rocco_archive as archive
 
 # 2h of cumulative active session time triggers a healthy-connection flush.
 THRESHOLD_S = 2 * 3600
@@ -79,6 +91,33 @@ def _remote_target() -> str:
     return f"{ssh_host()}:{store_dir()}/prompts.db"
 
 
+def sqlite3_rsync_path() -> str | None:
+    """The local sqlite3_rsync, or None. launchd's PATH lacks ~/.local/bin, so
+    that is checked explicitly."""
+    explicit = os.environ.get("ROCCO_SQLITE3_RSYNC")
+    if explicit:
+        return explicit if Path(explicit).exists() else None
+    found = shutil.which("sqlite3_rsync")
+    if found:
+        return found
+    local = Path.home() / ".local" / "bin" / "sqlite3_rsync"
+    return str(local) if local.exists() else None
+
+
+def _remote_sqlite3_rsync() -> str:
+    # Relative to the remote home, where ssh starts the command.
+    return os.environ.get("ROCCO_SQLITE3_RSYNC_REMOTE", ".local/bin/sqlite3_rsync")
+
+
+def _remote_path(name: str) -> str:
+    """`name` inside the store dir, as a path relative to the remote home
+    (sqlite3_rsync and the verify script get it unexpanded)."""
+    d = store_dir()
+    if d.startswith("~/"):
+        d = d[2:]
+    return f"{d}/{name}"
+
+
 # ── subprocess seam (tests monkeypatch this) ─────────────────────────────
 def _run(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -91,6 +130,8 @@ class SyncState:
     last_push_ok: bool = False
     active_seconds_at_last_push: int = 0
     prev_connected: bool | None = None
+    # Slices moved to Rocco: name, turns, bytes, sha256, archived_at.
+    archives: list = field(default_factory=list)
 
 
 def load_state(path: Path | None = None) -> SyncState:
@@ -104,6 +145,7 @@ def load_state(path: Path | None = None) -> SyncState:
         last_push_ok=bool(d.get("last_push_ok", False)),
         active_seconds_at_last_push=int(d.get("active_seconds_at_last_push", 0)),
         prev_connected=d.get("prev_connected"),
+        archives=list(d.get("archives", [])),
     )
 
 
@@ -155,19 +197,25 @@ def probe_connected(host: str | None = None, opts: list[str] | None = None) -> b
 
 
 # ── snapshot + push ──────────────────────────────────────────────────────
+def remove_snapshot(path: Path | None = None) -> None:
+    """Delete a snapshot and any journal files beside it."""
+    out = Path(path) if path is not None else SNAPSHOT_PATH
+    for suffix in ("", "-journal", "-wal", "-shm"):
+        Path(f"{out}{suffix}").unlink(missing_ok=True)
+
+
 def make_snapshot(db_path: Path | None = None, dest: Path | None = None) -> Path:
-    """Consistent copy of the live DB via SQLite's online-backup API, so we
-    never rsync a file mid-write. Returns the snapshot path."""
+    """Consistent, compact copy of the live DB, so we never rsync a file
+    mid-write. VACUUM INTO writes a fresh file directly; the old backup-API copy
+    landed in a WAL-mode leftover from a failed push and doubled through a
+    journal as large as the DB. Returns the snapshot path."""
     src_path = Path(db_path) if db_path is not None else DB_PATH
     out = Path(dest) if dest is not None else SNAPSHOT_PATH
     out.parent.mkdir(parents=True, exist_ok=True)
+    remove_snapshot(out)
     src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
     try:
-        dst = sqlite3.connect(str(out))
-        try:
-            src.backup(dst)
-        finally:
-            dst.close()
+        src.execute("VACUUM INTO ?", (str(out),))
     finally:
         src.close()
     return out
@@ -188,8 +236,18 @@ def rsync_push(snapshot: Path) -> None:
             f"rsync push failed ({cp.returncode}): {cp.stderr.strip()[-300:]}")
 
 
+def page_sync(tool: str) -> None:
+    """Make the remote prompts.db a copy of the live local DB, page by page."""
+    cp = _run([tool, str(DB_PATH), f"{ssh_host()}:{_remote_path('prompts.db')}",
+               "--exe", _remote_sqlite3_rsync(), "--ssh", str(ROOT / "bin" / "rocco-ssh")],
+              timeout=3600)
+    if cp.returncode != 0:
+        raise RoccoSyncError(
+            f"sqlite3_rsync failed ({cp.returncode}): {(cp.stderr or cp.stdout).strip()[-300:]}")
+
+
 def push() -> dict:
-    """Snapshot the DB, rsync it to Rocco, ship a manifest. Raises on failure."""
+    """Bring the remote replica up to date and ship a manifest. Raises on failure."""
     src = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     try:
         rows = int(src.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
@@ -197,11 +255,22 @@ def push() -> dict:
         src.close()
 
     ensure_remote_dir()
-    snap = make_snapshot()
-    rsync_push(snap)
+    tool = sqlite3_rsync_path()
+    if tool:
+        page_sync(tool)
+        size, method = DB_PATH.stat().st_size, "sqlite3_rsync"
+    else:
+        snap = make_snapshot()
+        try:
+            rsync_push(snap)
+            size, method = snap.stat().st_size, "snapshot"
+        finally:
+            # Never leave a snapshot behind, success or failure.
+            remove_snapshot(snap)
 
-    manifest = {"rows": rows, "bytes": snap.stat().st_size, "finished_at": _now_iso()}
-    mpath = snap.parent / "manifest.json"
+    manifest = {"rows": rows, "bytes": size, "method": method, "finished_at": _now_iso()}
+    mpath = SNAPSHOT_PATH.parent / "manifest.json"
+    mpath.parent.mkdir(parents=True, exist_ok=True)
     mpath.write_text(json.dumps(manifest))
     transport = "ssh " + " ".join(_ssh_opts())
     mcp = _run(["rsync", "-a", "-e", transport, str(mpath),
@@ -210,13 +279,82 @@ def push() -> dict:
     # so the remote manifest can't silently diverge from the pushed DB.
     manifest["manifest_pushed"] = (mcp.returncode == 0)
 
-    # Reclaim the ~1.4GB local snapshot — make_snapshot rebuilds it on the next
-    # push, and rsync's delta is computed against the REMOTE copy, not this file.
-    try:
-        snap.unlink()
-    except Exception:
-        pass
     return manifest
+
+
+# ── archive (size cap) ───────────────────────────────────────────────────
+_VERIFY_SCRIPT = """
+import hashlib, json, os, sqlite3, sys
+p = os.path.expanduser(sys.argv[1])
+h = hashlib.sha256()
+with open(p, "rb") as f:
+    for chunk in iter(lambda: f.read(1 << 20), b""):
+        h.update(chunk)
+c = sqlite3.connect("file:" + p + "?mode=ro", uri=True)
+print(json.dumps({"sha256": h.hexdigest(),
+                  "check": c.execute("PRAGMA quick_check").fetchone()[0],
+                  "turns": c.execute("SELECT COUNT(*) FROM turns").fetchone()[0]}))
+"""
+
+
+def upload_slice(path: Path) -> None:
+    cp = _run(["ssh", *_ssh_opts(), ssh_host(), f"mkdir -p {store_dir()} && mkdir -p -m 700 {store_dir()}/archive"], timeout=15)
+    if cp.returncode != 0:
+        raise RoccoSyncError(f"remote mkdir archive failed ({cp.returncode}): {cp.stderr.strip()}")
+    transport = "ssh " + " ".join(_ssh_opts())
+    cp = _run(["rsync", "-a", "--partial", "-e", transport, str(path),
+               f"{ssh_host()}:{store_dir()}/archive/{path.name}"], timeout=3600)
+    if cp.returncode != 0:
+        raise RoccoSyncError(f"slice upload failed ({cp.returncode}): {cp.stderr.strip()[-300:]}")
+
+
+def verify_remote_slice(name: str) -> dict:
+    """SHA-256, quick_check and turn count of the slice as Rocco reads it."""
+    remote = shlex.join(["python3", "-c", _VERIFY_SCRIPT, _remote_path(f"archive/{name}")])
+    cp = _run(["ssh", *_ssh_opts(), ssh_host(), remote], timeout=600)
+    if cp.returncode != 0:
+        raise RoccoSyncError(f"remote verify failed ({cp.returncode}): {cp.stderr.strip()[-300:]}")
+    return json.loads(cp.stdout.strip().splitlines()[-1])
+
+
+def archive_if_over_cap(*, db_path: Path | None = None, dry_run: bool = False) -> dict | None:
+    """Move the oldest turns to Rocco when the local DB passes the cap. Returns
+    None when under the cap. Nothing local is deleted unless Rocco's copy of
+    the slice matches byte for byte and opens cleanly there."""
+    dbp = Path(db_path) if db_path is not None else DB_PATH
+    conn = archive.open_db(dbp)
+    try:
+        live, cap = archive.live_bytes(conn), archive.cap_bytes()
+        if live <= cap:
+            return None
+        ids = archive.pick_oldest(conn, live - int(cap * archive.TARGET_FRACTION))
+        if not ids:
+            return None
+        name = archive.slice_name(conn, ids)
+        plan = {"slice": name, "turns": len(ids), "live_bytes": live, "cap_bytes": cap}
+        if dry_run:
+            return {**plan, "dry_run": True}
+        path = archive.SLICE_DIR / name
+        try:
+            counts = archive.export_slice(conn, ids, path)
+            sha, size = archive.sha256_file(path), path.stat().st_size
+            upload_slice(path)
+            remote = verify_remote_slice(name)
+            if (remote.get("sha256") != sha or remote.get("check") != "ok"
+                    or remote.get("turns") != counts["turns"]):
+                raise RoccoSyncError(f"remote slice does not match: {remote} vs sha={sha} "
+                                     f"turns={counts['turns']}")
+            deleted = archive.delete_archived(conn, ids, counts)
+            shrunk = archive.shrink(conn)
+        finally:
+            for suffix in ("", "-journal"):
+                Path(f"{path}{suffix}").unlink(missing_ok=True)
+        return {**plan, "deleted": deleted, "counts": counts, "sha256": sha, "bytes": size,
+                "shrink": shrunk, "live_bytes_after": archive.live_bytes(conn),
+                "file_bytes_after": dbp.stat().st_size,
+                "archived_at": _now_iso()}
+    finally:
+        conn.close()
 
 
 # ── decision ─────────────────────────────────────────────────────────────
@@ -235,9 +373,10 @@ def decide(state: SyncState, connected: bool, active_now: int) -> tuple[bool, st
 
 
 # ── tick (driven by the launchd agent) ───────────────────────────────────
-def tick(*, db_path: Path | None = None) -> dict:
-    # Single-flight: a 1.4GB first push can run longer than the 5-min launchd
-    # interval, so guard against an overlapping tick clobbering the snapshot.
+@contextlib.contextmanager
+def _single_flight():
+    """Yields True when this process holds the sync lock, False when another
+    run does. A push or an archive can outlast the 5-min launchd interval."""
     lock_path = Path(STATE_PATH).parent / ".rocco-sync.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lockf = open(lock_path, "w")
@@ -245,14 +384,22 @@ def tick(*, db_path: Path | None = None) -> dict:
         fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         lockf.close()
-        return {"skipped": "locked", "pushed": False}
+        yield False
+        return
     try:
-        return _tick_locked(db_path=db_path)
+        yield True
     finally:
         try:
             fcntl.flock(lockf, fcntl.LOCK_UN)
         finally:
             lockf.close()
+
+
+def tick(*, db_path: Path | None = None) -> dict:
+    with _single_flight() as held:
+        if not held:
+            return {"skipped": "locked", "pushed": False}
+        return _tick_locked(db_path=db_path)
 
 
 def _tick_locked(*, db_path: Path | None = None) -> dict:
@@ -285,6 +432,16 @@ def _tick_locked(*, db_path: Path | None = None) -> dict:
             state.last_push_finished_at = _now_iso()
             state.last_push_ok = False
             result["error"] = str(e)
+
+    if connected:
+        try:
+            moved = archive_if_over_cap(db_path=dbp)
+            if moved:
+                state.archives.append({k: moved[k] for k in
+                                       ("slice", "turns", "bytes", "sha256", "archived_at")})
+                result["archive"] = moved
+        except Exception as e:
+            result["archive_error"] = str(e)
 
     state.prev_connected = connected
     save_state(state)
@@ -337,6 +494,8 @@ def main(argv: list[str] | None = None) -> int:
     rp = sub.add_parser("restore", help="Pull the corpus back from Rocco (if local is missing).")
     rp.add_argument("--force", action="store_true", help="Overwrite a present local DB.")
     sub.add_parser("status", help="Print current sync state.")
+    ap = sub.add_parser("archive", help="Move the oldest turns to Rocco if over the size cap.")
+    ap.add_argument("--dry-run", action="store_true", help="Show what would move; change nothing.")
 
     args = p.parse_args(argv)
     if args.cmd == "tick":
@@ -347,8 +506,35 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "status":
         st = load_state()
-        print(json.dumps({**asdict(st), "host": ssh_host(),
-                          "store": store_dir(), "threshold_s": THRESHOLD_S}))
+        local = {}
+        try:
+            conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+            try:
+                local = {"live_bytes": archive.live_bytes(conn),
+                         "file_bytes": DB_PATH.stat().st_size,
+                         "oldest_local_turn": conn.execute(
+                             "SELECT MIN(started_at) FROM turns WHERE started_at <> ''").fetchone()[0]}
+            finally:
+                conn.close()
+        except Exception as e:
+            local = {"error": str(e)}
+        print(json.dumps({**asdict(st), "host": ssh_host(), "store": store_dir(),
+                          "threshold_s": THRESHOLD_S, "cap_bytes": archive.cap_bytes(),
+                          "method": "sqlite3_rsync" if sqlite3_rsync_path() else "snapshot",
+                          **local}))
+        return 0
+    if args.cmd == "archive":
+        with _single_flight() as held:
+            if not held:
+                print(json.dumps({"skipped": "locked"}))
+                return 1
+            moved = archive_if_over_cap(dry_run=args.dry_run)
+            if moved and not args.dry_run:
+                st = load_state()
+                st.archives.append({k: moved[k] for k in
+                                    ("slice", "turns", "bytes", "sha256", "archived_at")})
+                save_state(st)
+            print(json.dumps(moved or {"under_cap": True}))
         return 0
     p.print_help()
     return 2
